@@ -1,0 +1,36 @@
+# Reuse the prepared dependency image; this application build runs offline.
+FROM sphinx-tts-runtime:0.1.0
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/app/cache/huggingface \
+    HF_HUB_CACHE=/models/huggingface/hub \
+    TORCH_HOME=/app/cache/torch \
+    MODELSCOPE_CACHE=/root/.cache/modelscope \
+    COSYVOICE_MODEL_DIR=/models/cosyvoice/Fun-CosyVoice3-0.5B \
+    COSYVOICE_KEEP_CUDA_CACHE=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    PYTHONPATH=/app/services/vendor/CosyVoice:/app/services/vendor/CosyVoice/third_party/Matcha-TTS
+
+# Keep the installed vendor source and discard only the previous service source.
+RUN set -eu; \
+    mkdir -p /app/services/vendor; \
+    for vendor in /app/*/vendor/CosyVoice; do \
+        if [ -d "$vendor" ] && [ "$vendor" != /app/services/vendor/CosyVoice ]; then \
+            test ! -e /app/services/vendor/CosyVoice; \
+            mv "$vendor" /app/services/vendor/CosyVoice; \
+        fi; \
+    done; \
+    test -d /app/services/vendor/CosyVoice; \
+    for server in /app/*/cosyvoice_tts_server.py; do \
+        if [ -f "$server" ] && [ "${server%/*}" != /app/services ]; then \
+            rm -rf "${server%/*}"; \
+        fi; \
+    done
+
+WORKDIR /app/services
+COPY cosyvoice_tts_server.py bounded_inference_actor.py inference_limits.py ./
+
+EXPOSE 8103
+CMD ["uvicorn", "cosyvoice_tts_server:app", "--app-dir", "/app/services", "--host", "0.0.0.0", "--port", "8103"]

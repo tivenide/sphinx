@@ -1,0 +1,52 @@
+{
+    admin off
+    http_port 8080
+    https_port 8443
+    # IP-based HTTPS clients omit SNI; Docker hides the original LAN destination.
+    default_sni {$TLS_DEFAULT_SERVER_NAME:localhost}
+    auto_https disable_redirects
+    skip_install_trust
+}
+
+{$SITE_ADDRESS:localhost} {
+    root * /srv
+    encode zstd gzip
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+        Permissions-Policy "microphone=(self), camera=(), geolocation=()"
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; worker-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    }
+    handle /api/* {
+        @pdf_upload {
+            method POST
+            path /api/ingestion/documents
+        }
+        handle @pdf_upload {
+            request_body {
+                max_size 21MiB
+            }
+            reverse_proxy backend:8000
+        }
+        handle {
+            request_body {
+                max_size 8KB
+            }
+            reverse_proxy backend:8000
+        }
+    }
+    handle {
+        try_files {path} /index.html
+        header Cache-Control "no-cache"
+        file_server
+    }
+}
+
+http://:8080 {
+    redir {$PUBLIC_ORIGIN:https://localhost:6500}{uri} permanent
+}
+
+# Container liveness stays internal and does not depend on a particular public hostname.
+http://:8081 {
+    respond /healthz "ok" 200
+}

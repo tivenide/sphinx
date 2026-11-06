@@ -1,0 +1,25 @@
+# Reuse the prepared dependency image; this application build runs offline.
+FROM sphinx-asr-runtime:0.1.0
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME=/app/cache/huggingface \
+    HF_HUB_CACHE=/models/huggingface/hub \
+    TORCH_HOME=/app/cache/torch \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
+# Discard the previous application source without touching dependency layers.
+RUN set -eu; \
+    for server in /app/*/asr_server.py; do \
+        if [ -f "$server" ] && [ "${server%/*}" != /app/services ]; then \
+            rm -rf "${server%/*}"; \
+        fi; \
+    done
+
+WORKDIR /app/services
+COPY asr_server.py bounded_inference_actor.py inference_limits.py ./
+COPY voice/sphinx-male-calm.wav voice/sphinx-male-calm.wav
+
+EXPOSE 8101
+CMD ["uvicorn", "asr_server:app", "--app-dir", "/app/services", "--host", "0.0.0.0", "--port", "8101"]

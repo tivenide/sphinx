@@ -1,0 +1,5 @@
+# Python and compiler layer already cached by the Sphinx FFmpeg build.
+# The inference image adds the locally available vLLM packages.
+FROM python:3.12.13-slim-trixie@sha256:c3d81d25b3154142b0b42eb1e61300024426268edeb5b5a26dd7ddf64d9daf28 AS ffmpeg-build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc make libc6-dev \
+    && rm -rf /var/lib/apt/lists/*

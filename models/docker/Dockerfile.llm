@@ -1,0 +1,13 @@
+# Build offline with --build-context llm_packages=/path/to/site-packages.
+# The supplied packages must match Python 3.12 and the recorded package inventory.
+FROM sphinx-llm-runtime:py312-local
+ENV PYTHONPATH=/opt/llm/lib/python3.12/site-packages \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+COPY --from=llm_packages / /opt/llm/lib/python3.12/site-packages/
+# Keep writable Hub metadata separate from the mounted weight files.
+ENV HF_HOME=/app/cache/huggingface HF_HUB_CACHE=/models/huggingface/hub
+EXPOSE 8102
+ENTRYPOINT ["python", "-B", "-m", "vllm.entrypoints.openai.api_server"]

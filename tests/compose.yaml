@@ -1,0 +1,46 @@
+name: sphinx-smoke
+services:
+  frontend:
+    image: sphinx-frontend:0.3.0
+    environment:
+      SITE_ADDRESS: localhost
+      PUBLIC_ORIGIN: https://localhost:6510
+    ports: ["127.0.0.1:6510:8443"]
+    volumes: [caddy_data:/data, caddy_config:/config]
+    depends_on: [backend]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  backend:
+    image: sphinx-backend:0.3.0
+    environment:
+      PUBLIC_ORIGIN: https://localhost:6510
+      DATABASE_PATH: /data/smoke.sqlite3
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      ASR_URL: http://models:8100/v1/audio/transcriptions
+      LLM_URL: http://models:8100/v1/chat/completions
+      TTS_URL: http://models:8100/v1/voice-clone/stream
+      MODEL_CONTROL_URL: http://models:8100/control
+      MODEL_CONTROL_TOKEN_FILE: /run/secrets/model_control_token
+    volumes: [app_data:/data]
+    secrets: [admin_password, model_control_token]
+    depends_on: [models]
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  models:
+    image: sphinx-backend:0.3.0
+    volumes: ["./models_stub.py:/fixtures/models_stub.py:ro"]
+    secrets: [model_control_token]
+    command: [uvicorn, models_stub:app, --app-dir, /fixtures, --host, 0.0.0.0, --port, "8100", --no-access-log]
+volumes:
+  app_data:
+  caddy_data:
+  caddy_config:
+secrets:
+  admin_password:
+    file: ../.secrets/admin_password
+  model_control_token:
+    file: ../.secrets/model_control_token

@@ -1,0 +1,13 @@
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+tests
+voice/*
+!voice/sphinx-male-calm.wav
+weights
+pretrained_models
+vendor
+.venv
+.env*
+*.md
+manifest.json

@@ -1,0 +1,404 @@
+name: sphinx
+
+services:
+  frontend:
+    image: sphinx-frontend:0.3.0
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTPS_PORT:-6500}:${FRONTEND_PORT:-8443}"
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-6501}:8080"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://localhost:6500}
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web]
+    depends_on:
+      backend:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8081/healthz]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+
+  backend:
+    image: sphinx-backend:0.3.0
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://localhost:6500}
+      DATABASE_PATH: /data/sphinx.sqlite3
+      ADDITIONAL_PUBLIC_ORIGINS: ${ADDITIONAL_PUBLIC_ORIGINS:-}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      ASR_URL: http://asr:8101/v1/audio/transcriptions
+      LLM_URL: http://llm:8102/v1/chat/completions
+      TTS_URL: http://tts:8103/v1/voice-clone/stream
+      SPEECH_RATE: "1.10"
+      MODEL_CONTROL_URL: http://model-control:8082
+      MODEL_CONTROL_TOKEN_FILE: /run/secrets/model_control_token
+      INGESTION_WEBHOOK_URL: http://n8n:5678/webhook/sphinx-ingest
+      INGESTION_WEBHOOK_TOKEN_FILE: /run/secrets/ingestion_webhook_token
+      KNOWLEDGE_DB_HOST: vector-db
+      KNOWLEDGE_DB_PASSWORD_FILE: /run/secrets/retrieval_db_password
+      KNOWLEDGE_OLLAMA_URL: http://ollama.host:11434
+      KNOWLEDGE_MIN_SCORE: ${KNOWLEDGE_MIN_SCORE:-0.45}
+    secrets: [admin_password, model_control_token, ingestion_webhook_token, retrieval_db_password]
+    volumes: [app_data:/data]
+    extra_hosts:
+      - "ollama.host:${OLLAMA_HOST_ADDRESS:-host-gateway}"
+    networks: [web, models, control, ingestion]
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/live', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+  vector-db:
+    profiles: [ingestion]
+    image: ${VECTOR_DB_IMAGE:-pgvector/pgvector@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f}
+    pull_policy: never
+    restart: unless-stopped
+    logging: &ingestion_logging
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    environment:
+      POSTGRES_DB: sphinx_knowledge
+      POSTGRES_USER: sphinx_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/vector_db_admin_password
+    command: [postgres, -c, shared_buffers=64MB, -c, max_connections=20]
+    secrets: [vector_db_admin_password, ingestion_db_password, retrieval_db_password]
+    volumes:
+      - vector_data:/var/lib/postgresql/data
+      - ./database/01-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/02-role.sh:/docker-entrypoint-initdb.d/02-role.sh:ro
+      - ./database/03-retrieval.sh:/docker-entrypoint-initdb.d/03-retrieval.sh:ro
+      - ./database/retrieval.sql:/opt/sphinx/retrieval.sql:ro
+    networks: [ingestion]
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777", "/var/run/postgresql:size=8m,mode=3775"]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 1.0
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U sphinx_admin -d sphinx_knowledge"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+
+  n8n:
+    profiles: [ingestion]
+    image: ${N8N_IMAGE:-n8nio/n8n@sha256:4384b9ff20a78bc1708c35ce7864f84f724611de7801fb36d715998db7c000f1}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *ingestion_logging
+    ports:
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
+    environment:
+      GENERIC_TIMEZONE: Europe/Berlin
+      TZ: Europe/Berlin
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-http://localhost:5678}
+      N8N_WEBHOOK_URL: http://n8n:5678/
+      N8N_PROXY_HOPS: "1"
+      N8N_ENCRYPTION_KEY_FILE: /run/secrets/n8n_encryption_key
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "true"
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_RUNNERS_AUTH_TOKEN_FILE: /run/secrets/n8n_runner_token
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: "1"
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      N8N_PAYLOAD_SIZE_MAX: "21"
+      N8N_FORMDATA_FILE_SIZE_MAX: "21"
+      EXECUTIONS_TIMEOUT: "300"
+      EXECUTIONS_TIMEOUT_MAX: "300"
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "true"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "24"
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: "10"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_COMMUNITY_PACKAGES_ENABLED: "false"
+    secrets: [n8n_encryption_key, n8n_runner_token]
+    volumes:
+      - n8n_data:/home/node/.n8n
+    extra_hosts:
+      - "ollama.host:${OLLAMA_HOST_ADDRESS:-host-gateway}"
+    networks: [web, ingestion, n8n_runners]
+    # n8n regenerates its editor cache under /home/node/.cache at startup.
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1.0
+    depends_on:
+      vector-db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:5678/healthz/readiness').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  n8n-runner:
+    profiles: [ingestion]
+    image: ${N8N_RUNNER_IMAGE:-n8nio/runners@sha256:7ae8720b0c2e1c3504cb4386394183ced00fa227697e4fa47f095b0e368827b6}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *ingestion_logging
+    command: [javascript]
+    environment:
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_AUTH_TOKEN_FILE: /run/secrets/n8n_runner_token
+      N8N_RUNNERS_MAX_CONCURRENCY: "1"
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: "60"
+    secrets: [n8n_runner_token]
+    networks: [n8n_runners]
+    read_only: true
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    depends_on:
+      n8n:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:5680/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  model-control:
+    image: sphinx-backend:0.3.0
+    restart: unless-stopped
+    # Root within Docker's namespace can access its socket; the web API stays unprivileged.
+    user: "0:0"
+    command: [python, -m, app.model_control]
+    environment:
+      MODEL_CONTROL_TOKEN_FILE: /run/secrets/model_control_token
+      MODEL_PROJECT: ${COMPOSE_PROJECT_NAME:-sphinx}
+      MODEL_CONTAINER_ASR: ${COMPOSE_PROJECT_NAME:-sphinx}-asr-1
+      MODEL_CONTAINER_LLM: ${COMPOSE_PROJECT_NAME:-sphinx}-llm-1
+      MODEL_CONTAINER_TTS: ${COMPOSE_PROJECT_NAME:-sphinx}-tts-1
+      MODEL_IMAGE_ASR: ${ASR_IMAGE:-sphinx-asr:0.3.0}
+      MODEL_IMAGE_LLM: ${LLM_IMAGE:-sphinx-llm:0.3.0}
+      MODEL_IMAGE_TTS: ${TTS_IMAGE:-sphinx-tts:0.3.0}
+    secrets: [model_control_token]
+    volumes:
+      - type: bind
+        source: ${MODEL_DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [control]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1',8082),timeout=2).close()"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+
+  asr:
+    profiles: [models]
+    image: ${ASR_IMAGE:-sphinx-asr:0.3.0}
+    pull_policy: never
+    build:
+      context: ./models
+      dockerfile: docker/Dockerfile.asr
+    restart: unless-stopped
+    environment:
+      ASR_MODEL: Qwen/Qwen3-ASR-0.6B
+      ASR_MODEL_REVISION: 5eb144179a02acc5e5ba31e748d22b0cf3e303b0
+      HF_HOME: /app/cache/huggingface
+      HF_HUB_CACHE: /models/huggingface/hub
+      TORCH_HOME: /app/cache/torch
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - model_weights:/models:ro
+      - torch_cache:/app/cache/torch
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    networks: [models]
+    shm_size: 1gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VOICE_GPU:-1}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/ready', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+
+  llm:
+    profiles: [models]
+    image: ${LLM_IMAGE:-sphinx-llm:0.3.0}
+    pull_policy: never
+    user: "0:0"
+    restart: unless-stopped
+    environment:
+      HF_HOME: /app/cache/huggingface
+      HF_HUB_CACHE: /models/huggingface/hub
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_USE_FLASHINFER_SAMPLER: "0"
+      TRITON_CACHE_DIR: /root/.cache/vllm/triton
+      VLLM_NO_USAGE_STATS: "1"
+      DO_NOT_TRACK: "1"
+    command:
+      - --model
+      - Qwen/Qwen3-30B-A3B-Instruct-2507
+      - --revision
+      - 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8102"
+      - --served-model-name
+      - sphinx-llm
+      - --tensor-parallel-size
+      - "2"
+      - --gpu-memory-utilization
+      - "0.66"
+      - --max-model-len
+      - "16384"
+      - --max-num-seqs
+      - "1"
+      - --disable-custom-all-reduce
+      - --enforce-eager
+    volumes:
+      - model_weights:/models:ro
+      - vllm_cache:/root/.cache/vllm
+    networks: [models]
+    shm_size: 16gb
+    stop_grace_period: 60s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${LLM_GPU_0:-0}", "${LLM_GPU_1:-1}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8102/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+
+  tts:
+    profiles: [models]
+    image: ${TTS_IMAGE:-sphinx-tts:0.3.0}
+    pull_policy: never
+    build:
+      context: ./models
+      dockerfile: docker/Dockerfile.cosyvoice
+    restart: unless-stopped
+    environment:
+      HF_HOME: /app/cache/huggingface
+      HF_HUB_CACHE: /models/huggingface/hub
+      TORCH_HOME: /app/cache/torch
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      COSYVOICE_MODEL_DIR: /models/cosyvoice/Fun-CosyVoice3-0.5B
+      COSYVOICE_KEEP_CUDA_CACHE: "1"
+      SPHINX_TTS_REFERENCE_AUDIO: /app/voice/sphinx-male-calm.wav
+      SPHINX_TTS_REFERENCE_TEXT: "Hallo, ich bin Sphinx. Ich höre dir zu, ordne deine Anfrage ein und antworte klar und verständlich. Du kannst ganz normal mit mir sprechen."
+    volumes:
+      - ./models/voice:/app/voice:ro
+      - model_weights:/models:ro
+      - torch_cache:/app/cache/torch
+      - cosyvoice_cache:/root/.cache
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    networks: [models]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VOICE_GPU:-1}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8103/status',timeout=2))['status']=='ready'"]
+      interval: 30s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+
+networks:
+  web:
+  models:
+    internal: true
+  control:
+    internal: true
+  ingestion:
+    internal: true
+  n8n_runners:
+    internal: true
+
+volumes:
+  app_data:
+  vector_data:
+  n8n_data:
+  caddy_data:
+  caddy_config:
+  model_weights:
+    name: ${MODEL_WEIGHTS_VOLUME:-ai-models}
+    external: true
+  torch_cache:
+    name: ${TORCH_CACHE_VOLUME:-sphinx_torch_cache}
+  cosyvoice_cache:
+    name: ${COSYVOICE_CACHE_VOLUME:-sphinx_cosyvoice_cache}
+  vllm_cache:
+    name: ${VLLM_CACHE_VOLUME:-sphinx_vllm_cache}
+
+secrets:
+  admin_password:
+    file: ./.secrets/admin_password
+  model_control_token:
+    file: ./.secrets/model_control_token
+  vector_db_admin_password:
+    file: ./.secrets/vector_db_admin_password
+  ingestion_db_password:
+    file: ./.secrets/ingestion_db_password
+  retrieval_db_password:
+    file: ./.secrets/retrieval_db_password
+  n8n_encryption_key:
+    file: ./.secrets/n8n_encryption_key
+  n8n_runner_token:
+    file: ./.secrets/n8n_runner_token
+  ingestion_webhook_token:
+    file: ./.secrets/ingestion_webhook_token

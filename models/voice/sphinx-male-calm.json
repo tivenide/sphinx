@@ -1,0 +1,23 @@
+{
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+  "revision": "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+  "method": "Qwen3-TTS generate_voice_design",
+  "description": "Eine eigenständige, eindeutig männliche deutsche Stimme eines erwachsenen Mannes mit warmer, mitteltiefer Baritonlage. Sachlich, gelassen, klar und aufmerksam. Zurückhaltende Sprechenergie, weiche Satzanfänge und dezente Betonung. Leicht technische Klangfarbe durch klare Konsonanten, kleine kontrollierte Tonhöhenbewegungen und gleichmäßige, angenehme Lautstärke. Natürlich und fließend sprechen, in entspanntem normalem Gesprächstempo ohne Drängen, mit kurzen natürlichen Pausen. Wach und präsent bleiben, nicht müde, flüsternd oder schleppend. Akzentfreies Standardhochdeutsch. Natürlich resonant, ohne künstlich übertiefe oder gepresste Stimme. Keine Werbe- oder Radiostimme, keine übertriebene Begeisterung und kein metallischer Robotereffekt. Sphinx wird als ein Wort ausgesprochen.",
+  "text": "Hallo, ich bin Sphinx. Ich höre dir zu, ordne deine Anfrage ein und antworte klar und verständlich. Du kannst ganz normal mit mir sprechen.",
+  "seed": 20261030,
+  "device": "cpu",
+  "dtype": "float32",
+  "attention": "sdpa",
+  "max_new_tokens": 360,
+  "sample_rate": 24000,
+  "duration_seconds": 10.16,
+  "pcm_gain": 1.0,
+  "generation_seconds": 41.79,
+  "offline": true,
+  "packages": {
+    "qwen-tts": "0.1.1",
+    "torch": "2.12.0",
+    "transformers": "4.57.3"
+  },
+  "sha256": "cc21ba5b3d211fe9e630716318da6dbbd044a4299420b2a1a5d4608ab0a22d3e"
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "application": "Sphinx",
+  "weights_volume": "ai-models",
+  "weights_layout": {
+    "huggingface": "huggingface/hub",
+    "cosyvoice": "cosyvoice/Fun-CosyVoice3-0.5B"
+  },
+  "models": [
+    {
+      "service": "asr",
+      "model": "Qwen/Qwen3-ASR-0.6B",
+      "revision": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0"
+    },
+    {
+      "service": "llm",
+      "model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "revision": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe"
+    },
+    {
+      "service": "tts",
+      "model": "Fun-CosyVoice3-0.5B"
+    }
+  ],
+  "selected_voice": {
+    "audio": "voice/sphinx-male-calm.wav",
+    "transcript": "voice/sphinx-male-calm.txt",
+    "generation_metadata": "voice/sphinx-male-calm.json",
+    "audio_sha256": "cc21ba5b3d211fe9e630716318da6dbbd044a4299420b2a1a5d4608ab0a22d3e",
+    "transcript_sha256": "7566e00d03ff8d63e031199d808ad49e6bb09d12329240dd41acb540b2e81a41"
+  }
+}

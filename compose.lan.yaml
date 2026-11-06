@@ -1,0 +1,12 @@
+# Optional LAN HTTPS listener alongside the existing local/Tailscale listener.
+# Activate through COMPOSE_FILE=compose.yaml:compose.lan.yaml in .env.
+services:
+  frontend:
+    ports:
+      - "${LAN_ADDRESS:?Set LAN_ADDRESS to this server's LAN IPv4 address}:${LAN_HTTPS_PORT:-6502}:8443"
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:-localhost} https://${LAN_ADDRESS}:8443"
+      TLS_DEFAULT_SERVER_NAME: ${LAN_ADDRESS}
+  backend:
+    environment:
+      ADDITIONAL_PUBLIC_ORIGINS: "${ADDITIONAL_PUBLIC_ORIGINS:-} https://${LAN_ADDRESS}:${LAN_HTTPS_PORT:-6502}"

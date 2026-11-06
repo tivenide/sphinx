@@ -1,0 +1,64 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    ffmpeg \
+    git \
+    libsndfile1 \
+    libsox-dev \
+    python3.10 \
+    python3.10-dev \
+    python3.10-venv \
+    sox \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN python3.10 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+COPY requirements-cosyvoice.txt /app/services/requirements-cosyvoice.txt
+RUN git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git /app/services/vendor/CosyVoice \
+    && cd /app/services/vendor/CosyVoice \
+    && git checkout 074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc \
+    && git submodule update --init --recursive \
+    && pip install --upgrade pip wheel \
+    && pip install "setuptools==69.5.1" \
+    && pip install --no-build-isolation openai-whisper==20231117 \
+    && pip install -r /app/services/requirements-cosyvoice.txt \
+    && pip check \
+    && python -c "import torch; assert torch.version.cuda == '12.1', torch.version.cuda"
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    HF_HOME=/app/cache/huggingface \
+    HF_HUB_CACHE=/models/huggingface/hub \
+    TORCH_HOME=/app/cache/torch \
+    MODELSCOPE_CACHE=/root/.cache/modelscope \
+    COSYVOICE_MODEL_DIR=/models/cosyvoice/Fun-CosyVoice3-0.5B \
+    COSYVOICE_KEEP_CUDA_CACHE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    libsox-dev \
+    python3.10 \
+    sox \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /app/services/vendor/CosyVoice /app/services/vendor/CosyVoice
+
+RUN mkdir -p /app/cache/huggingface /app/cache/torch /root/.cache/modelscope
+
+ENV PYTHONPATH="/app/services/vendor/CosyVoice:/app/services/vendor/CosyVoice/third_party/Matcha-TTS"
+
+EXPOSE 8103

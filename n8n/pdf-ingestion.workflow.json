@@ -1,0 +1,455 @@
+{
+  "name": "Sphinx - PDF-Ingestion (Ollama + pgvector)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sphinx-ingest",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e56f38bc-8dbc-5381-98bd-ae6ef9e06bf3",
+      "name": "PDF Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "f580fb78-d970-5c7c-930a-e9713617837e",
+      "notes": "Header-Auth wird durch scripts/import_ingestion.py eingerichtet. Erwartet multipart file + sha256 vom authentifizierten Backend.",
+      "notesInFlow": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "e8b9b7f1-615a-4b4c-8a82-7c008143d101",
+          "name": "Sphinx Ingestion Header"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Configure the address reachable FROM the n8n container here.\nconst OLLAMA_BASE_URL = 'http://ollama.host:11434';\nconst EMBEDDING_MODEL = 'bge-m3:latest';\nconst MAX_PDF_BYTES = 20 * 1024 * 1024;\nconst fail = (code, detail) => { throw new Error(`INGEST_${code}|${detail}`); };\n\nconst items = $input.all();\nif (items.length !== 1) fail(400, 'Bitte genau eine PDF pro Anfrage senden.');\nconst item = items[0];\nconst entries = Object.entries(item.binary ?? {});\nif (entries.length !== 1 || !['file', 'file0'].includes(entries[0][0])) {\n  fail(400, 'Eine PDF im Multipart-Feld file ist erforderlich.');\n}\nconst [key, binary] = entries[0];\nconst sha256 = item.json.body?.sha256;\n// The authenticated backend MUST calculate this hash from the actual PDF bytes.\nif (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) {\n  fail(400, 'Ein vom Backend berechneter SHA-256-Hash im Feld sha256 ist erforderlich.');\n}\nconst filename = String(binary.fileName || 'document.pdf').split(/[\\\\/]/).pop();\nif (!filename || filename.length > 255 || !/\\.pdf$/i.test(filename) || /[\\x00-\\x1f]/.test(filename)) {\n  fail(400, 'Bitte einen gueltigen PDF-Dateinamen verwenden.');\n}\nconst buffer = await this.helpers.getBinaryDataBuffer(0, key);\nif (buffer.length === 0) fail(400, 'Die PDF-Datei ist leer.');\nif (buffer.length > MAX_PDF_BYTES) fail(413, 'Die PDF ueberschreitet das Limit von 20 MiB.');\nif (!buffer.subarray(0, 1024).toString('latin1').includes('%PDF-')) {\n  fail(422, 'Die Datei enthaelt keine erkennbare PDF.');\n}\nreturn [{\n  json: { filename, sha256, embedding_model: EMBEDDING_MODEL,\n          ollama_base_url: OLLAMA_BASE_URL.replace(/\\/$/, '') },\n  binary: { file: binary },\n}];"
+      },
+      "id": "adf21330-353c-5370-a9c6-9d695e61c7c7",
+      "name": "Validate Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "file",
+        "options": {
+          "joinPages": true,
+          "keepSource": "json"
+        }
+      },
+      "id": "3ec280b7-a0c9-5e28-bcd5-0ba41c8bd43d",
+      "name": "Extract PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        480,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.first().json;\nconst metadata = $('Validate Upload').first().json;\nconst fail = (code, detail) => { throw new Error(`INGEST_${code}|${detail}`); };\nconst CHUNK_SIZE = 1000;\nconst OVERLAP = 200;\nconst MAX_TEXT_CHARACTERS = 750000;\nconst MAX_CHUNKS = 1000;\nif (typeof input.text !== 'string') fail(422, 'Der PDF-Text konnte nicht gelesen werden.');\nconst text = input.text.replace(/\\u0000/g, '').replace(/\\r\\n?/g, '\\n').trim();\nif (!text) fail(422, 'Die PDF enthaelt keinen lesbaren Text. Scans benoetigen OCR.');\nif (text.length > MAX_TEXT_CHARACTERS) fail(413, 'Die PDF enthaelt zu viel Text. Bitte in kleinere PDFs aufteilen.');\nconst chunks = [];\nfor (let start = 0; start < text.length;) {\n  let end = Math.min(start + CHUNK_SIZE, text.length);\n  if (end < text.length) {\n    // Prefer paragraph/sentence/line boundaries in the last 40% of this window.\n    const window = text.slice(start, end);\n    for (const separator of ['\\n\\n', '. ', '! ', '? ', '\\n', ' ']) {\n      const boundary = window.lastIndexOf(separator);\n      if (boundary >= 600) { end = start + boundary + separator.length; break; }\n    }\n    // Never split a UTF-16 surrogate pair.\n    const left = text.charCodeAt(end - 1), right = text.charCodeAt(end);\n    if (left >= 0xD800 && left <= 0xDBFF && right >= 0xDC00 && right <= 0xDFFF) end--;\n  }\n  const content = text.slice(start, end).trim();\n  if (content) chunks.push({ index: chunks.length, text: content });\n  if (chunks.length > MAX_CHUNKS) fail(413, 'Die PDF erzeugt zu viele Textabschnitte. Bitte aufteilen.');\n  if (end >= text.length) break;\n  start = end - OVERLAP;\n  const code = text.charCodeAt(start);\n  if (code >= 0xDC00 && code <= 0xDFFF) start++;\n}\nif (!chunks.length) fail(422, 'Die PDF enthaelt keine verwertbaren Textabschnitte.');\nreturn [{ json: { ...metadata, chunks } }];"
+      },
+      "id": "aa81b0da-070a-50c1-91e8-8f031a6ad7eb",
+      "name": "Chunk Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Upload').first().json.ollama_base_url + '/api/tags' }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "e2635482-ff79-5fec-b77e-3613d67bd486",
+      "name": "Read Model Revision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const document = $('Chunk Text').first().json;\nconst models = $input.first().json.models;\nconst model = Array.isArray(models) && models.find(m =>\n  m.name === document.embedding_model || m.model === document.embedding_model);\nif (!model || typeof model.digest !== 'string' || !/^(sha256:)?[0-9a-f]{64}$/.test(model.digest)) {\n  throw new Error('INGEST_503|Das konfigurierte Embedding-Modell ist in Ollama nicht verfuegbar.');\n}\nreturn [{ json: { ...document, embedding_revision: model.digest } }];"
+      },
+      "id": "d5713a2d-45e6-53a0-b62d-42e3b52c0d91",
+      "name": "Prepare Embeddings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Validate Upload').first().json.ollama_base_url + '/api/embed' }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: $json.embedding_model, input: $json.chunks.map(chunk => chunk.text), truncate: false, keep_alive: '5m' } }}",
+        "options": {
+          "timeout": 240000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "89941bd2-b86f-5dbe-b5d4-5fcd923fb3de",
+      "name": "Create Embeddings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const document = $('Prepare Embeddings').first().json;\nconst response = $input.first().json;\nconst vectors = response.embeddings;\nconst fail = () => { throw new Error('INGEST_503|Der Embedding-Dienst hat unvollstaendige oder ungueltige Vektoren geliefert.'); };\nif (response.model !== document.embedding_model || !Array.isArray(vectors) || vectors.length !== document.chunks.length) fail();\nfor (const vector of vectors) {\n  if (!Array.isArray(vector) || vector.length !== 1024 ||\n      !vector.every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 3.4028234663852886e38) ||\n      !vector.some(v => v !== 0)) fail();\n}\nreturn [{ json: { document: {\n  sha256: document.sha256,\n  filename: document.filename,\n  embedding_model: document.embedding_model,\n  embedding_revision: document.embedding_revision,\n  chunks: document.chunks.map((chunk, index) => ({ ...chunk, embedding: vectors[index] })),\n} } }];"
+      },
+      "id": "3bcfe25c-94e7-5a0b-8878-b23113bccd62",
+      "name": "Prepare Document",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "SELECT sphinx_ingestion.ingest_document($1::jsonb) AS result;",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.document)] }}"
+        }
+      },
+      "id": "68d8f4ed-7e72-53af-8a3f-17fa9edfb828",
+      "name": "Store Document",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1920,
+        0
+      ],
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "postgres": {
+          "id": "e8b9b7f1-615a-4b4c-8a82-7c008143d102",
+          "name": "Sphinx Knowledge DB"
+        }
+      },
+      "notes": "Atomarer Commit von Dokument und Chunks in vector-db:5432. Gleicher SHA-256 wird nicht doppelt gespeichert.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ...$json.result, stored: true } }}",
+        "options": {
+          "responseCode": "={{ $json.result.status === 'ingested' ? 201 : 200 }}"
+        }
+      },
+      "id": "71d453b6-238b-557f-adf3-54ddcb1a5fe1",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        2160,
+        0
+      ],
+      "notes": "Erfolg erst nach dem Datenbank-Commit: ingested oder already_exists, jeweils mit document_id und chunks.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const raw = $input.first().json.error;\nconst message = (typeof raw === 'string' ? raw : (raw?.message ?? '')).replace(/\\s*\\[line \\d+\\]\\s*$/, '');\nconst match = message.match(/INGEST_(400|413|422|503)\\|([^\\n]+)/);\n// Do not expose credentials, SQL, internal hostnames, or upstream response bodies.\nreturn [{ json: {\n  statusCode: match ? Number(match[1]) : 503,\n  body: { detail: match ? match[2] : 'Die Ingestion ist fehlgeschlagen. Bitte erneut versuchen oder die n8n-Konfiguration pruefen.' },\n} }];"
+      },
+      "id": "b1711264-8924-51bd-a9a0-f7aa6aac2f31",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}"
+        }
+      },
+      "id": "1f420690-49fd-5dcd-b270-8d1297d4ad41",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1680,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { detail: \"Die PDF kann nicht gelesen werden. Bitte eine gueltige, unverschluesselte PDF mit Text verwenden.\" } }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "id": "c5e799b3-096b-540f-8648-8eb2a6db99a9",
+      "name": "Respond Invalid PDF",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        720,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Sphinx: PDF → Ollama → pgvector\n\nEigenes Projekt-n8n; bestehende fremde Instanzen bleiben unveraendert.\n\n1. `scripts/setup_ingestion.py` erzeugt die lokale Konfiguration und Secrets.\n2. `vector-db`, `n8n` und `n8n-runner` mit Compose starten.\n3. `scripts/import_ingestion.py` richtet Credentials und diesen inaktiven Workflow ein.\n4. Im lokalen n8n testen; erst danach veroeffentlichen.\n\nWebhook: `/webhook/sphinx-ingest`, Header `X-Ingestion-Token`.\nEine PDF pro Request: multipart `file` + `sha256`; Hash aus den Dateibytes im Backend berechnen. Max. 20 MiB, 750.000 Textzeichen, 1.000 Chunks.\n\nOllama: `http://ollama.host:11434` (lokaler Host, kein Tailscale).\nDatenbank: `vector-db:5432` im privaten Docker-Netz, ohne Host-Port.\n`bge-m3:latest`: 1024 Dimensionen; Modelldigest wird gespeichert.\n\n**Store Document** schreibt Dokument und Chunks atomar. Erfolg: `ingested` oder `already_exists`, `stored: true`.\n\nWorkflowlimit: 300 s. Keine Secrets im Export. Die Sphinx-UI ist ueber das Backend angebunden. Kurze Ausfuehrungshistorie: Bereinigung nach 24 Stunden bzw. 10 Laeufen. Einrichtung: README.md im Projektroot, Abschnitt Dokumentwissen und PDF-Import.",
+        "height": 580,
+        "width": 600,
+        "color": 5
+      },
+      "id": "4719e982-761b-5c57-8586-b9eeaa32d204",
+      "name": "Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -600
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "PDF Upload": {
+      "main": [
+        [
+          {
+            "node": "Validate Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Upload": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF": {
+      "main": [
+        [
+          {
+            "node": "Chunk Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Invalid PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Text": {
+      "main": [
+        [
+          {
+            "node": "Read Model Revision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Model Revision": {
+      "main": [
+        [
+          {
+            "node": "Prepare Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Create Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Prepare Document",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Document": {
+      "main": [
+        [
+          {
+            "node": "Store Document",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Document": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300,
+    "timezone": "Europe/Berlin",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": false
+  },
+  "versionId": "767a0d03-3a33-5e7a-ae5a-a77395d20573",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": [],
+  "id": "SphinxPdfIngest1"
+}

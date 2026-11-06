@@ -1,0 +1,22 @@
+.env
+.env.*
+!.env.example
+.secrets/
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+node_modules/
+dist/
+test-results/
+playwright-report/
+data/
+*.sqlite*
+# Local database backups may contain imported document contents.
+*.dump
+*.dump.gz
+*.log
+.DS_Store
+models/weights/
+models/pretrained_models/
+models/vendor/
